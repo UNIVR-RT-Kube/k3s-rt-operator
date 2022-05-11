@@ -1,0 +1,62 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  # name must match the spec fields below, and be in the form: <plural>.<group>
+  name: realtimes.scheduling.francescol96.univr
+spec:
+  # group name to use for REST API: /apis/<group>/<version>
+  group: scheduling.francescol96.univr
+  # list of versions supported by this CustomResourceDefinition
+  versions:
+    - name: v1
+      # Each version can be enabled/disabled by Served flag.
+      served: true
+      # One and only one version must be marked as the storage version.
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-validations:
+          - rule: "self.rtDeadline <= self.rtPeriod"
+            message: "Deadline should be <= Period."
+          - rule: "self.rtPeriod <= self.rtWcet"
+            message: "Period should be <= to all rtWcets"
+          properties:
+            spec:
+              type: object
+              properties:
+                criticality:
+                  type: string
+                  pattern: '^[ABC]{1}$'
+                rtPeriod:
+                  type: integer
+                  minimum: 1
+                rtDeadline:
+                  type: integer
+                  minimum: 1
+                rtWcets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      node:
+                        type: string
+                      rtWcet:
+                        type: integer
+                        minimum: 1
+              required:
+              - rtDeadline
+              - criticality
+              - rtWcets
+  # either Namespaced or Cluster
+  scope: Namespaced
+  names:
+    # plural name to be used in the URL: /apis/<group>/<version>/<plural>
+    plural: realtimes
+    # singular name to be used as an alias on the CLI and for display
+    singular: realtime
+    # kind is normally the CamelCased singular type. Your resource manifests use this.
+    kind: RealTime
+    # shortNames allow shorter string to match your resource on the CLI
+    shortNames:
+    - rt

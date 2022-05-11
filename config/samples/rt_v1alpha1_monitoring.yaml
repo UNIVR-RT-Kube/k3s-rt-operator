@@ -1,0 +1,9 @@
+apiVersion: rt.francescol96.univr/v1alpha1
+kind: Monitoring
+metadata:
+  name: monitoring-test
+spec:
+  node: franc-ideapad-5-14are05
+  podname: ubuntu2
+  missedDeadlinesPeriod: 0
+  missedDeadlinesTotal: 0
