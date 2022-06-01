@@ -13,4 +13,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: registry.gitlab.com/francescol96/rt-tests-container/operator
-  newTag: "0.2"
+  newTag: 0.0.1

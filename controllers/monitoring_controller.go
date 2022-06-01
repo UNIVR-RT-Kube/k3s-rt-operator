@@ -116,19 +116,31 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Info("Deleting pod: too many missed RT deadlines", "MissedDeadlinesPeriod", rt.Spec.MissedDeadlinesPeriod)
 
 		// Taint the node so that no other pod can be scheduled on it
-		foundNode.Spec.Taints = append(foundNode.Spec.Taints, corev1.Taint{
-			Key:    "RTDeadlinePressure",
-			Value:  "True",
-			Effect: corev1.TaintEffectNoSchedule,
-		})
-		logger.Info("Deleting pod: tainted node with RTDeadlinePressure:noSchedule")
-		err = r.Update(ctx, foundNode)
-		if err != nil {
-			logger.Error(err, "Error while tainting the node")
-			return ctrl.Result{}, err
+		taintExists := false
+		for _, taint := range foundNode.Spec.Taints {
+			if taint.Key == "RTDeadlinePressure" {
+				taintExists = true
+			}
+		}
+		if taintExists {
+			logger.Info("Node already tainted with RTDeadlinePressure:noSchedule")
+		} else {
+			foundNode.Spec.Taints = append(foundNode.Spec.Taints, corev1.Taint{
+				Key:    "RTDeadlinePressure",
+				Value:  "True",
+				Effect: corev1.TaintEffectNoSchedule,
+			})
+			logger.Info("Tainting node with RTDeadlinePressure:noSchedule")
+			err = r.Update(ctx, foundNode)
+			if err != nil {
+				logger.Error(err, "Error while tainting the node")
+				return ctrl.Result{}, err
+			}
 		}
 
 		// Delete the victim pod with some policy # selectPodVictimForDeletion(rt, podList)
+		// Delete the current pod
+		logger.Info("Deleting Pod")
 		err = r.Delete(ctx, selectPodVictimForDeletion(rt, podList))
 		if err != nil {
 			logger.Error(err, "Error while deleting pod", "Pod", podList.Items[foundPod].Name)
