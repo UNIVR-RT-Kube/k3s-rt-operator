@@ -67,3 +67,10 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - scheduling.francescol96.univr
+  resources:
+  - realtimes
+  verbs:
+  - get
+  - list

@@ -18,12 +18,18 @@ package controllers
 
 import (
 	"context"
+	errorsGo "errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +41,21 @@ import (
 type MonitoringReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+// RealTimeWCET is part of RealTimeData Struct
+type RealTimeWCET struct {
+	Node   string
+	RTWcet int
+}
+
+// RealTimeData is a struct to extract data from the RealTime scheduling CRD
+type RealTimeData struct {
+	appName     string
+	Criticality string
+	RTDeadline  int
+	RTPeriod    int
+	RTWcets     []RealTimeWCET
 }
 
 // Map that contains the as key the name of the node, and as value the time left before removing the taint
@@ -50,6 +71,7 @@ const polling_rate = 30
 //+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=nodes/status,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=scheduling.francescol96.univr,resources=realtimes,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -61,6 +83,7 @@ const polling_rate = 30
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
 func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	defer duration(track("Reconcile"))
 	logger := log.Log.WithValues("Moniroting/rt", req.NamespacedName)
 	logger.Info("Moniroting/rt Reconcile method")
 
@@ -163,6 +186,17 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 // Insert your policy for eviction here
 func selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
 	for _, pod := range podList.Items {
+		realTimeData, err := GetRealTimeData(context.TODO())
+		if err != nil {
+			log.Log.Error(err, "could not obtain RT data")
+		} else {
+			for _, rtItem := range realTimeData {
+				if pod.Labels["scheduling.francescol96.univr"] == rtItem.appName {
+					log.Log.Info("-----> rtItem found", "appName", rtItem.appName)
+					// Do something with RT object and Pod list
+				}
+			}
+		}
 		if pod.Name == rt.Spec.PodName {
 			return &pod
 		}
@@ -217,4 +251,87 @@ func (r *MonitoringReconciler) StartTaintThread() {
 			}
 		}
 	}()
+}
+
+func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
+	resultErr := []RealTimeData{{Criticality: "N"}}
+	var result []RealTimeData
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return resultErr, errorsGo.New("could not obtain incluster config")
+	}
+	dynamic := dynamic.NewForConfigOrDie(config)
+	items, err := GetResourcesDynamically(dynamic, ctx, "scheduling.francescol96.univr", "v1", "realtimes", "default")
+
+	if err != nil {
+		return resultErr, err
+	} else {
+		for _, item := range items {
+			typedData := RealTimeData{}
+			appName, appNameFound, appNameErr := unstructured.NestedString(item.Object, "metadata", "name")
+			criticality, criticalityFound, criticalityErr := unstructured.NestedString(item.Object, "spec", "criticality")
+			rtDeadline, rtDeadlineFound, rtDeadlineErr := unstructured.NestedInt64(item.Object, "spec", "rtDeadline")
+			rtPeriod, rtPeriodFound, rtPeriodErr := unstructured.NestedInt64(item.Object, "spec", "rtPeriod")
+			if appNameFound && appNameErr == nil {
+				typedData.appName = appName
+			} else {
+				return resultErr, appNameErr
+			}
+			if criticalityFound && criticalityErr == nil {
+				typedData.Criticality = criticality
+			} else {
+				return resultErr, criticalityErr
+			}
+
+			if rtDeadlineFound && rtDeadlineErr == nil {
+				typedData.RTDeadline = int(rtDeadline)
+			} else {
+				return resultErr, rtDeadlineErr
+			}
+
+			if rtPeriodFound && rtPeriodErr == nil {
+				typedData.RTPeriod = int(rtPeriod)
+			} else {
+				return resultErr, rtPeriodErr
+			}
+
+			rtWcets, rtWcetsFound, rtWcetsErr := unstructured.NestedSlice(item.Object, "spec", "rtWcets")
+			if rtWcetsFound && rtWcetsErr == nil {
+				rtWcetsArray := []RealTimeWCET{}
+				for _, rtWcet := range rtWcets {
+					mapRTWcet, ok := rtWcet.(map[string]interface{})
+					if !ok {
+						return resultErr, errorsGo.New("unable to obtain map from rtWcet object")
+					}
+					rtWcetsArray = append(rtWcetsArray, RealTimeWCET{Node: mapRTWcet["node"].(string), RTWcet: int(mapRTWcet["rtWcet"].(int64))})
+				}
+				typedData.RTWcets = append(typedData.RTWcets, rtWcetsArray...)
+			} else {
+				return resultErr, rtWcetsErr
+			}
+			result = append(result, typedData)
+		}
+	}
+	return result, nil
+}
+
+func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, namespace string) ([]unstructured.Unstructured, error) {
+	resourceId := schema.GroupVersionResource{
+		Group:    group,
+		Version:  version,
+		Resource: resource,
+	}
+	list, err := dynamic.Resource(resourceId).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+func track(msg string) (string, time.Time) {
+	return msg, time.Now()
+}
+
+func duration(msg string, start time.Time) {
+	log.Log.Info("Time", msg, time.Since(start))
 }
