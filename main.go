@@ -78,10 +78,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.MonitoringReconciler{
+	reconciler := &controllers.MonitoringReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Monitoring")
 		os.Exit(1)
 	}
@@ -95,6 +97,9 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
+
+	setupLog.Info("starting thread for taint timeout monitoring")
+	reconciler.StartTaintThread()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

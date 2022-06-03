@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -35,6 +36,13 @@ type MonitoringReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+// Map that contains the as key the name of the node, and as value the time left before removing the taint
+// The value is encoded as "value * polling_rate" seconds
+var Timers = make(map[string]int)
+
+// The polling rate to remove the taint
+const polling_rate = 30
 
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings/status,verbs=get;update;patch
@@ -123,7 +131,8 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		if taintExists {
-			logger.Info("Node already tainted with RTDeadlinePressure:noSchedule")
+			logger.Info("Node already tainted with RTDeadlinePressure:noSchedule, updating timer")
+			Timers[foundNode.Name]++
 		} else {
 			foundNode.Spec.Taints = append(foundNode.Spec.Taints, corev1.Taint{
 				Key:    "RTDeadlinePressure",
@@ -136,6 +145,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				logger.Error(err, "Error while tainting the node")
 				return ctrl.Result{}, err
 			}
+			Timers[foundNode.Name] = 1
 		}
 
 		// Delete the victim pod with some policy # selectPodVictimForDeletion(rt, podList)
@@ -165,4 +175,46 @@ func (r *MonitoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rtv1alpha1.Monitoring{}).
 		Complete(r)
+}
+
+func (r *MonitoringReconciler) StartTaintThread() {
+	go func() {
+		logger := log.Log.WithValues("Moniroting/rt.TaintMonitoringThread", "Taint")
+		logger.Info("Starting taint monitoring thread")
+		for {
+			time.Sleep(time.Duration(polling_rate) * time.Second)
+			logger.Info("Taint Thread: Waking up, working...", "len(Timers)", len(Timers))
+			for nodeName, timer := range Timers {
+				if timer <= 0 {
+					node := &corev1.Node{}
+					err := r.Get(context.TODO(), types.NamespacedName{Name: nodeName}, node)
+					if err != nil {
+						if errors.IsNotFound(err) {
+							logger.Error(err, "Taint Thread: node not found, ignoring...")
+							continue
+						}
+						logger.Error(err, "Taint Thread: failed to get node instance")
+						continue
+					}
+					for i, taint := range node.Spec.Taints {
+						if taint.Key == "RTDeadlinePressure" {
+							// assign last element to RTDeadlinePressure position
+							node.Spec.Taints[i] = node.Spec.Taints[len(node.Spec.Taints)-1]
+							// Update array without last element
+							node.Spec.Taints = node.Spec.Taints[:len(node.Spec.Taints)-1]
+						}
+						logger.Info("Taint Thread: untaining node", "node", nodeName)
+						err = r.Update(context.TODO(), node)
+						if err != nil {
+							logger.Error(err, "Taint Thread: error while un-tainting the node")
+						}
+					}
+					delete(Timers, nodeName)
+				} else {
+					logger.Info("Decrementing timer", nodeName, Timers[nodeName])
+					Timers[nodeName]--
+				}
+			}
+		}
+	}()
 }
