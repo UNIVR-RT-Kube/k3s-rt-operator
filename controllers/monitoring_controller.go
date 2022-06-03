@@ -211,16 +211,23 @@ func (r *MonitoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// This thread uses the variable "Timers" to keep track of the nodes tainted with "RTDeadlinePressure"
+// After the "polling_rate", if the timer for the node is zero and the taint is present, the taint is removed
 func (r *MonitoringReconciler) StartTaintThread() {
 	go func() {
 		logger := log.Log.WithValues("Moniroting/rt.TaintMonitoringThread", "Taint")
 		logger.Info("Starting taint monitoring thread")
 		for {
+			// Sleeps for "polling_rate" seconds
 			time.Sleep(time.Duration(polling_rate) * time.Second)
 			logger.Info("Taint Thread: Waking up, working...", "len(Timers)", len(Timers))
+			// Checks all timers
 			for nodeName, timer := range Timers {
+				// For each timer that has expired
 				if timer <= 0 {
 					node := &corev1.Node{}
+					// Obtaines the node for the timer
+					// Note: we cannot store the node in the data structure because it may change inside Kubernetes and we need the latest version
 					err := r.Get(context.TODO(), types.NamespacedName{Name: nodeName}, node)
 					if err != nil {
 						if errors.IsNotFound(err) {
@@ -230,6 +237,7 @@ func (r *MonitoringReconciler) StartTaintThread() {
 						logger.Error(err, "Taint Thread: failed to get node instance")
 						continue
 					}
+					// We check all the taints, if "RTDeadlinePressure" is present, we remove it and update the node
 					for i, taint := range node.Spec.Taints {
 						if taint.Key == "RTDeadlinePressure" {
 							// assign last element to RTDeadlinePressure position
@@ -243,8 +251,10 @@ func (r *MonitoringReconciler) StartTaintThread() {
 							logger.Error(err, "Taint Thread: error while un-tainting the node")
 						}
 					}
+					// We remove the entry about the tainted node because we removed the taint
 					delete(Timers, nodeName)
 				} else {
+					// If the timer is not zero, we decrement it
 					logger.Info("Decrementing timer", nodeName, Timers[nodeName])
 					Timers[nodeName]--
 				}
@@ -253,6 +263,8 @@ func (r *MonitoringReconciler) StartTaintThread() {
 	}()
 }
 
+// Uses the function "GetResourcesDynamically" to obtain the RT objects used for scheduling
+// These objects are obtained for the eviction policy
 func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 	resultErr := []RealTimeData{{Criticality: "N"}}
 	var result []RealTimeData
@@ -266,6 +278,7 @@ func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 	if err != nil {
 		return resultErr, err
 	} else {
+		// For each unstructured item in the list, we get the fields and compile an ad-hoc data strcture manually
 		for _, item := range items {
 			typedData := RealTimeData{}
 			appName, appNameFound, appNameErr := unstructured.NestedString(item.Object, "metadata", "name")
@@ -294,7 +307,7 @@ func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 			} else {
 				return resultErr, rtPeriodErr
 			}
-
+			// As there may be more than one WCET listed in the object, we have to iterate on a list
 			rtWcets, rtWcetsFound, rtWcetsErr := unstructured.NestedSlice(item.Object, "spec", "rtWcets")
 			if rtWcetsFound && rtWcetsErr == nil {
 				rtWcetsArray := []RealTimeWCET{}
@@ -315,6 +328,7 @@ func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 	return result, nil
 }
 
+// This function obtains untyped resources, such as CRDs defined thrugh a yaml
 func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, namespace string) ([]unstructured.Unstructured, error) {
 	resourceId := schema.GroupVersionResource{
 		Group:    group,
@@ -328,10 +342,12 @@ func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, gro
 	return list.Items, nil
 }
 
+// Timing function to measure performance, starts the timer
 func track(msg string) (string, time.Time) {
 	return msg, time.Now()
 }
 
+// Timing function to measure performance, calculates the delay
 func duration(msg string, start time.Time) {
 	log.Log.Info("Time", msg, time.Since(start))
 }
