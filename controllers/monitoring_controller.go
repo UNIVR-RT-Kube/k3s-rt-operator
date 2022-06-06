@@ -51,14 +51,13 @@ type RealTimeWCET struct {
 
 // RealTimeData is a struct to extract data from the RealTime scheduling CRD
 type RealTimeData struct {
-	appName     string
 	Criticality string
 	RTDeadline  int
 	RTPeriod    int
 	RTWcets     []RealTimeWCET
 }
 
-// Map that contains the as key the name of the node, and as value the time left before removing the taint
+// Map that contains as key the name of the node, and as value the time left before removing the taint
 // The value is encoded as "value * polling_rate" seconds
 var Timers = make(map[string]int)
 
@@ -190,11 +189,9 @@ func selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodLi
 		if err != nil {
 			log.Log.Error(err, "could not obtain RT data")
 		} else {
-			for _, rtItem := range realTimeData {
-				if pod.Labels["scheduling.francescol96.univr"] == rtItem.appName {
-					log.Log.Info("-----> rtItem found", "appName", rtItem.appName)
-					// Do something with RT object and Pod list
-				}
+			if rtItem, ok := realTimeData[pod.Labels["scheduling.francescol96.univr"]]; ok {
+				log.Log.Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
+				// Use the RT scheduling object of the pod to decide
 			}
 		}
 		if pod.Name == rt.Spec.PodName {
@@ -240,6 +237,7 @@ func (r *MonitoringReconciler) StartTaintThread() {
 					// We check all the taints, if "RTDeadlinePressure" is present, we remove it and update the node
 					for i, taint := range node.Spec.Taints {
 						if taint.Key == "RTDeadlinePressure" {
+							// To remove the taint from the array:
 							// assign last element to RTDeadlinePressure position
 							node.Spec.Taints[i] = node.Spec.Taints[len(node.Spec.Taints)-1]
 							// Update array without last element
@@ -265,9 +263,11 @@ func (r *MonitoringReconciler) StartTaintThread() {
 
 // Uses the function "GetResourcesDynamically" to obtain the RT objects used for scheduling
 // These objects are obtained for the eviction policy
-func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
-	resultErr := []RealTimeData{{Criticality: "N"}}
-	var result []RealTimeData
+func GetRealTimeData(ctx context.Context) (map[string]RealTimeData, error) {
+	resultErr := make(map[string]RealTimeData)
+	resultErr["error"] = RealTimeData{Criticality: "N"}
+
+	result := make(map[string]RealTimeData)
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return resultErr, errorsGo.New("could not obtain incluster config")
@@ -285,11 +285,7 @@ func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 			criticality, criticalityFound, criticalityErr := unstructured.NestedString(item.Object, "spec", "criticality")
 			rtDeadline, rtDeadlineFound, rtDeadlineErr := unstructured.NestedInt64(item.Object, "spec", "rtDeadline")
 			rtPeriod, rtPeriodFound, rtPeriodErr := unstructured.NestedInt64(item.Object, "spec", "rtPeriod")
-			if appNameFound && appNameErr == nil {
-				typedData.appName = appName
-			} else {
-				return resultErr, appNameErr
-			}
+
 			if criticalityFound && criticalityErr == nil {
 				typedData.Criticality = criticality
 			} else {
@@ -322,7 +318,11 @@ func GetRealTimeData(ctx context.Context) ([]RealTimeData, error) {
 			} else {
 				return resultErr, rtWcetsErr
 			}
-			result = append(result, typedData)
+			if appNameFound && appNameErr == nil {
+				result[appName] = typedData
+			} else {
+				return resultErr, appNameErr
+			}
 		}
 	}
 	return result, nil
@@ -347,7 +347,7 @@ func track(msg string) (string, time.Time) {
 	return msg, time.Now()
 }
 
-// Timing function to measure performance, calculates the delay
+// Timing function to measure performance, calculates the delay since the timer started
 func duration(msg string, start time.Time) {
 	log.Log.Info("Time", msg, time.Since(start))
 }
