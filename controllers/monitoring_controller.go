@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,7 +39,8 @@ import (
 // MonitoringReconciler reconciles a Monitoring object
 type MonitoringReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	DynamicClient dynamic.Interface
 }
 
 // RealTimeWCET is part of RealTimeData Struct
@@ -62,7 +62,7 @@ type RealTimeData struct {
 var Timers = make(map[string]int)
 
 // The polling rate to remove the taint
-const polling_rate = 30
+const polling_rate = 10
 
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings/status,verbs=get;update;patch
@@ -82,9 +82,9 @@ const polling_rate = 30
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
 func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	defer duration(track("Reconcile"))
+	defer duration(track("Reconcile")) // This call measures the Reconcile run-time
 	logger := log.Log.WithValues("Moniroting/rt", req.NamespacedName)
-	logger.Info("Moniroting/rt Reconcile method")
+	logger.V(1).Info("Moniroting/rt Reconcile method")
 
 	rt := &rtv1alpha1.Monitoring{}
 
@@ -92,7 +92,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	err := r.Get(ctx, req.NamespacedName, rt)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("Moniroting/rt resource not found. Ignoring since object must be deleted")
+			logger.V(1).Info("Moniroting/rt resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Moniroting/rt instance")
@@ -101,11 +101,11 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check if node specified in monitoring object exists
 	foundNode := &corev1.Node{}
-	logger.Info("Checking if node exists:", "Node", rt.Spec.Node)
+	logger.V(1).Info("Checking if node exists:", "Node", rt.Spec.Node)
 	err = r.Get(ctx, types.NamespacedName{Name: rt.Spec.Node}, foundNode)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("Checking if node exists: Node not found. Ignoring..")
+			logger.V(1).Info("Checking if node exists: Node not found. Ignoring..")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get node instance for comparison with RT monitoring")
@@ -114,7 +114,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check if pod specified in monitoring object exists
 	podList := &corev1.PodList{}
-	logger.Info("Checking if pod exists:", "Pod", rt.Spec.PodName)
+	logger.V(1).Info("Checking if pod exists:", "Pod", rt.Spec.PodName)
 	opts := []client.ListOption{
 		client.InNamespace("default"),
 	}
@@ -137,13 +137,13 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if foundPod == -1 || podList.Items[foundPod].Name != rt.Spec.PodName {
-		logger.Info("Checking if pod exists: Pod not found. Ignoring...")
+		logger.V(1).Info("Checking if pod exists: Pod not found. Ignoring...")
 		return ctrl.Result{}, nil
 	}
 
 	// The pod and node exist, check if req missedDeadlinesPeriod are higher than VALUE
 	if rt.Spec.MissedDeadlinesPeriod > 10 {
-		logger.Info("Deleting pod: too many missed RT deadlines", "MissedDeadlinesPeriod", rt.Spec.MissedDeadlinesPeriod)
+		logger.V(1).Info("Deleting pod: too many missed RT deadlines", "MissedDeadlinesPeriod", rt.Spec.MissedDeadlinesPeriod)
 
 		// Taint the node so that no other pod can be scheduled on it
 		taintExists := false
@@ -153,7 +153,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		if taintExists {
-			logger.Info("Node already tainted with RTDeadlinePressure:noSchedule, updating timer")
+			logger.V(1).Info("Node already tainted with RTDeadlinePressure:noSchedule, updating timer")
 			Timers[foundNode.Name]++
 		} else {
 			foundNode.Spec.Taints = append(foundNode.Spec.Taints, corev1.Taint{
@@ -161,7 +161,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				Value:  "True",
 				Effect: corev1.TaintEffectNoSchedule,
 			})
-			logger.Info("Tainting node with RTDeadlinePressure:noSchedule")
+			logger.V(1).Info("Tainting node with RTDeadlinePressure:noSchedule")
 			err = r.Update(ctx, foundNode)
 			if err != nil {
 				logger.Error(err, "Error while tainting the node")
@@ -172,9 +172,13 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 		// Delete the victim pod with some policy # selectPodVictimForDeletion(rt, podList)
 		// Delete the current pod
-		logger.Info("Deleting Pod")
-		err = r.Delete(ctx, selectPodVictimForDeletion(rt, podList))
+		logger.V(1).Info("Deleting Pod")
+		err = r.Delete(ctx, r.selectPodVictimForDeletion(rt, podList))
 		if err != nil {
+			if errors.IsNotFound(err) {
+				logger.V(0).Info("Pod not found. Ignoring since pod must be deleted")
+				return ctrl.Result{}, nil
+			}
 			logger.Error(err, "Error while deleting pod", "Pod", podList.Items[foundPod].Name)
 			return ctrl.Result{}, err
 		}
@@ -183,98 +187,31 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // Insert your policy for eviction here
-func selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
-	for _, pod := range podList.Items {
-		realTimeData, err := GetRealTimeData(context.TODO())
-		if err != nil {
-			log.Log.Error(err, "could not obtain RT data")
-		} else {
+func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
+	realTimeData, err := r.GetRealTimeData(context.TODO())
+	if err != nil {
+		log.Log.Error(err, "could not obtain RT data")
+	} else {
+		for _, pod := range podList.Items {
 			if rtItem, ok := realTimeData[pod.Labels["scheduling.francescol96.univr"]]; ok {
-				log.Log.Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
+				log.Log.V(1).Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
 				// Use the RT scheduling object of the pod to decide
 			}
-		}
-		if pod.Name == rt.Spec.PodName {
-			return &pod
+			if pod.Name == rt.Spec.PodName {
+				return &pod
+			}
 		}
 	}
 	return &corev1.Pod{}
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *MonitoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&rtv1alpha1.Monitoring{}).
-		Complete(r)
-}
-
-// This thread uses the variable "Timers" to keep track of the nodes tainted with "RTDeadlinePressure"
-// After the "polling_rate", if the timer for the node is zero and the taint is present, the taint is removed
-func (r *MonitoringReconciler) StartTaintThread() {
-	go func() {
-		logger := log.Log.WithValues("Moniroting/rt.TaintMonitoringThread", "Taint")
-		logger.Info("Starting taint monitoring thread")
-		for {
-			// Sleeps for "polling_rate" seconds
-			time.Sleep(time.Duration(polling_rate) * time.Second)
-			logger.Info("Taint Thread: Waking up, working...", "len(Timers)", len(Timers))
-			// Checks all timers
-			for nodeName, timer := range Timers {
-				// For each timer that has expired
-				if timer <= 0 {
-					node := &corev1.Node{}
-					// Obtaines the node for the timer
-					// Note: we cannot store the node in the data structure because it may change inside Kubernetes and we need the latest version
-					err := r.Get(context.TODO(), types.NamespacedName{Name: nodeName}, node)
-					if err != nil {
-						if errors.IsNotFound(err) {
-							logger.Error(err, "Taint Thread: node not found, ignoring...")
-							continue
-						}
-						logger.Error(err, "Taint Thread: failed to get node instance")
-						continue
-					}
-					// We check all the taints, if "RTDeadlinePressure" is present, we remove it and update the node
-					for i, taint := range node.Spec.Taints {
-						if taint.Key == "RTDeadlinePressure" {
-							// To remove the taint from the array:
-							// assign last element to RTDeadlinePressure position
-							node.Spec.Taints[i] = node.Spec.Taints[len(node.Spec.Taints)-1]
-							// Update array without last element
-							node.Spec.Taints = node.Spec.Taints[:len(node.Spec.Taints)-1]
-						}
-						logger.Info("Taint Thread: untaining node", "node", nodeName)
-						err = r.Update(context.TODO(), node)
-						if err != nil {
-							logger.Error(err, "Taint Thread: error while un-tainting the node")
-						}
-					}
-					// We remove the entry about the tainted node because we removed the taint
-					delete(Timers, nodeName)
-				} else {
-					// If the timer is not zero, we decrement it
-					logger.Info("Decrementing timer", nodeName, Timers[nodeName])
-					Timers[nodeName]--
-				}
-			}
-		}
-	}()
-}
-
 // Uses the function "GetResourcesDynamically" to obtain the RT objects used for scheduling
 // These objects are obtained for the eviction policy
-func GetRealTimeData(ctx context.Context) (map[string]RealTimeData, error) {
+func (r *MonitoringReconciler) GetRealTimeData(ctx context.Context) (map[string]RealTimeData, error) {
 	resultErr := make(map[string]RealTimeData)
-	resultErr["error"] = RealTimeData{Criticality: "N"}
-
 	result := make(map[string]RealTimeData)
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return resultErr, errorsGo.New("could not obtain incluster config")
-	}
-	dynamic := dynamic.NewForConfigOrDie(config)
-	items, err := GetResourcesDynamically(dynamic, ctx, "scheduling.francescol96.univr", "v1", "realtimes", "default")
 
+	items, err := r.GetResourcesDynamically(ctx, "scheduling.francescol96.univr", "v1", "realtimes", "default")
 	if err != nil {
 		return resultErr, err
 	} else {
@@ -329,13 +266,13 @@ func GetRealTimeData(ctx context.Context) (map[string]RealTimeData, error) {
 }
 
 // This function obtains untyped resources, such as CRDs defined thrugh a yaml
-func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, namespace string) ([]unstructured.Unstructured, error) {
+func (r *MonitoringReconciler) GetResourcesDynamically(ctx context.Context, group string, version string, resource string, namespace string) ([]unstructured.Unstructured, error) {
 	resourceId := schema.GroupVersionResource{
 		Group:    group,
 		Version:  version,
 		Resource: resource,
 	}
-	list, err := dynamic.Resource(resourceId).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	list, err := r.DynamicClient.Resource(resourceId).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +284,83 @@ func track(msg string) (string, time.Time) {
 	return msg, time.Now()
 }
 
+var min time.Duration = time.Duration(100) * time.Second
+var max time.Duration = time.Duration(0) * time.Nanosecond
+var counter int = 1
+
 // Timing function to measure performance, calculates the delay since the timer started
 func duration(msg string, start time.Time) {
-	log.Log.Info("Time", msg, time.Since(start))
+	elapsed := time.Since(start)
+	if counter > 1 {
+		if elapsed < min {
+			min = elapsed
+		}
+		if elapsed > max {
+			max = elapsed
+		}
+	}
+	if counter%50 == 0 {
+		log.Log.V(0).Info("Time", msg, elapsed, "Max", max, "Min", min)
+	}
+	counter++
+}
+
+// This thread uses the variable "Timers" to keep track of the nodes tainted with "RTDeadlinePressure"
+// After the "polling_rate", if the timer for the node is zero and the taint is present, the taint is removed
+func (r *MonitoringReconciler) StartTaintThread() {
+	go func() {
+		logger := log.Log.WithValues("Moniroting/rt.TaintMonitoringThread", "Taint")
+		logger.V(1).Info("Starting taint monitoring thread")
+		for {
+			// Sleeps for "polling_rate" seconds
+			time.Sleep(time.Duration(polling_rate) * time.Second)
+			logger.V(1).Info("Taint Thread: Waking up, working...", "len(Timers)", len(Timers))
+			// Checks all timers
+			for nodeName, timer := range Timers {
+				// For each timer that has expired
+				if timer <= 0 {
+					node := &corev1.Node{}
+					// Obtaines the node for the timer
+					// Note: we cannot store the node in the data structure because it may change inside Kubernetes and we need the latest version
+					err := r.Get(context.TODO(), types.NamespacedName{Name: nodeName}, node)
+					if err != nil {
+						if errors.IsNotFound(err) {
+							logger.Error(err, "Taint Thread: node not found, ignoring...")
+							continue
+						}
+						logger.Error(err, "Taint Thread: failed to get node instance")
+						continue
+					}
+					// We check all the taints, if "RTDeadlinePressure" is present, we remove it and update the node
+					for i, taint := range node.Spec.Taints {
+						if taint.Key == "RTDeadlinePressure" {
+							// To remove the taint from the array:
+							// assign last element to RTDeadlinePressure position
+							node.Spec.Taints[i] = node.Spec.Taints[len(node.Spec.Taints)-1]
+							// Update array without last element
+							node.Spec.Taints = node.Spec.Taints[:len(node.Spec.Taints)-1]
+						}
+						logger.V(1).Info("Taint Thread: untaining node", "node", nodeName)
+						err = r.Update(context.TODO(), node)
+						if err != nil {
+							logger.Error(err, "Taint Thread: error while un-tainting the node")
+						}
+					}
+					// We remove the entry about the tainted node because we removed the taint
+					delete(Timers, nodeName)
+				} else {
+					// If the timer is not zero, we decrement it
+					logger.V(1).Info("Decrementing timer", nodeName, Timers[nodeName])
+					Timers[nodeName]--
+				}
+			}
+		}
+	}()
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *MonitoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&rtv1alpha1.Monitoring{}).
+		Complete(r)
 }

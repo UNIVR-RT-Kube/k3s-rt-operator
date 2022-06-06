@@ -28,3 +28,4 @@ testbin/*
 /artifacts/deploy/deploy.sh
 /artifacts/deploy/ubuntu_dep.yaml
 /artifacts/deploy/ubuntu_dep2.yaml
+/artifacts/deploy/realTimeObjects.yaml

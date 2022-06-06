@@ -22,6 +22,8 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"go.uber.org/zap/zapcore"
+	"k8s.io/client-go/dynamic"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,6 +61,7 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	opts := zap.Options{
 		Development: true,
+		Level:       zapcore.Level(0), // Set this value to level 1 to show debug information
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -79,8 +82,9 @@ func main() {
 	}
 
 	reconciler := &controllers.MonitoringReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		DynamicClient: dynamic.NewForConfigOrDie(mgr.GetConfig()),
 	}
 
 	if err = reconciler.SetupWithManager(mgr); err != nil {
