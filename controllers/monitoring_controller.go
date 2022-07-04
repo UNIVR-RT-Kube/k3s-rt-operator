@@ -29,11 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	rtv1alpha1 "github.com/francescol96/monitorrt/api/v1alpha1"
+	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // MonitoringReconciler reconciles a Monitoring object
@@ -70,6 +72,7 @@ const polling_rate = 10
 //+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=nodes/status,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=scheduling.francescol96.univr,resources=realtimes,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -188,6 +191,11 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // Insert your policy for eviction here
 func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
+	listMetrics, err := listMetrics()
+	if err != nil {
+		log.Log.Error(err, "selectPodVictimForDeletion: error retrieving pods metrics")
+		return &corev1.Pod{}
+	}
 	realTimeData, err := r.GetRealTimeData(context.TODO())
 	if err != nil {
 		log.Log.Error(err, "could not obtain RT data")
@@ -197,12 +205,42 @@ func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitor
 				log.Log.V(1).Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
 				// Use the RT scheduling object of the pod to decide
 			}
+			if metricsItem, ok := listMetrics[pod.Name]; ok {
+				log.Log.V(1).Info("Metrics found", "pod", pod.Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
+				// Use the metrics object of the pod to decide
+			}
 			if pod.Name == rt.Spec.PodName {
 				return &pod
 			}
 		}
 	}
 	return &corev1.Pod{}
+}
+
+func listMetrics() (map[string]corev1.ResourceList, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	mc, err := metrics.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	podMetricses, err := mc.MetricsV1beta1().PodMetricses(metav1.NamespaceDefault).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]corev1.ResourceList)
+	for _, pod := range podMetricses.Items {
+		for _, container := range pod.Containers {
+			// We assume there is only one container for each pod
+			result[pod.Name] = container.Usage
+		}
+	}
+	return result, nil
 }
 
 // Uses the function "GetResourcesDynamically" to obtain the RT objects used for scheduling
