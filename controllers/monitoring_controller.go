@@ -19,10 +19,12 @@ package controllers
 import (
 	"context"
 	errorsGo "errors"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -175,14 +177,19 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 		// Delete the victim pod with some policy # selectPodVictimForDeletion(rt, podList)
 		// Delete the current pod
-		logger.V(1).Info("Deleting Pod")
-		err = r.Delete(ctx, r.selectPodVictimForDeletion(rt, podList))
+		victimPod := r.selectPodVictimForDeletion(rt, podList)
+		if victimPod == nil {
+			logger.V(0).Info("No pod can be evicted")
+			return ctrl.Result{}, nil
+		}
+		err = r.Delete(ctx, victimPod)
+		logger.V(1).Info("Deleting Pod", "Pod", victimPod)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				logger.V(0).Info("Pod not found. Ignoring since pod must be deleted")
 				return ctrl.Result{}, nil
 			}
-			logger.Error(err, "Error while deleting pod", "Pod", podList.Items[foundPod].Name)
+			logger.Error(err, "Error while deleting pod", "Pod", victimPod)
 			return ctrl.Result{}, err
 		}
 	}
@@ -200,21 +207,43 @@ func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitor
 	if err != nil {
 		log.Log.Error(err, "could not obtain RT data")
 	} else {
-		for _, pod := range podList.Items {
+		// Sort by CPU usage using QuickSort in o(nlog(n))
+		sort.SliceStable(podList.Items, func(i, j int) bool {
+			var usageI resource.Quantity
+			var usageJ resource.Quantity
+			if metricsItem, ok := listMetrics[podList.Items[i].Name]; ok {
+				log.Log.V(1).Info("Metrics found", "pod", podList.Items[i].Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
+				usageI = metricsItem["cpu"]
+			}
+			if metricsItem, ok := listMetrics[podList.Items[j].Name]; ok {
+				log.Log.V(1).Info("Metrics found", "pod", podList.Items[j].Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
+				usageJ = metricsItem["cpu"]
+			}
+			if usageI.AsDec().Cmp(usageJ.AsDec()) < 0 {
+				return false
+			} else {
+				return true
+			}
+		})
+		// Sift through the pods, with the first being the highest CPU usage
+		for i, pod := range podList.Items {
 			if rtItem, ok := realTimeData[pod.Labels["scheduling.francescol96.univr"]]; ok {
 				log.Log.V(1).Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
-				// Use the RT scheduling object of the pod to decide
-			}
-			if metricsItem, ok := listMetrics[pod.Name]; ok {
-				log.Log.V(1).Info("Metrics found", "pod", pod.Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
-				// Use the metrics object of the pod to decide
-			}
-			if pod.Name == rt.Spec.PodName {
+				// If the node only has RT containers, start evicting RT containers too
+				// Only if they are not criticality C
+				if i == 0 && rtItem.Criticality != "C" {
+					return &pod
+				}
+			} else {
 				return &pod
 			}
+			/*
+				if pod.Name == rt.Spec.PodName {
+					victim = &pod
+				}*/
 		}
 	}
-	return &corev1.Pod{}
+	return nil
 }
 
 func listMetrics() (map[string]corev1.ResourceList, error) {
