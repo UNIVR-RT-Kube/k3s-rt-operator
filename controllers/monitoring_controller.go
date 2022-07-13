@@ -183,7 +183,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, nil
 		}
 		err = r.Delete(ctx, victimPod)
-		logger.V(1).Info("Deleting Pod", "Pod", victimPod)
+		logger.V(0).Info("Deleting Pod", "Pod", victimPod)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				logger.V(0).Info("Pod not found. Ignoring since pod must be deleted")
@@ -209,38 +209,51 @@ func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitor
 	} else {
 		// Sort by CPU usage using QuickSort in o(nlog(n))
 		sort.SliceStable(podList.Items, func(i, j int) bool {
+			podI := podList.Items[i]
+			podJ := podList.Items[j]
 			var usageI resource.Quantity
 			var usageJ resource.Quantity
-			if metricsItem, ok := listMetrics[podList.Items[i].Name]; ok {
-				log.Log.V(1).Info("Metrics found", "pod", podList.Items[i].Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
-				usageI = metricsItem["cpu"]
-			}
-			if metricsItem, ok := listMetrics[podList.Items[j].Name]; ok {
-				log.Log.V(1).Info("Metrics found", "pod", podList.Items[j].Name, "CPU", metricsItem["cpu"], "Mem", metricsItem["memory"])
-				usageJ = metricsItem["cpu"]
-			}
-			if usageI.AsDec().Cmp(usageJ.AsDec()) < 0 {
+			var isRealTimeI bool
+			var isRealTimeJ bool
+			_, isRealTimeI = realTimeData[podI.Labels["scheduling.francescol96.univr"]]
+			_, isRealTimeJ = realTimeData[podJ.Labels["scheduling.francescol96.univr"]]
+
+			// If only one of the two containers is RT, then its CPU usage is always "lower" (i.e., we consider non-RT containers first)
+			if isRealTimeI && !isRealTimeJ {
 				return false
-			} else {
+			} else if !isRealTimeI && isRealTimeJ {
 				return true
+			} else {
+				// If they are both RT or neither is, then we compare the actual CPU usage
+				if metricsItem, ok := listMetrics[podI.Name]; ok {
+					usageI = metricsItem["cpu"]
+				} else {
+					usageI = *resource.NewQuantity(0, "DecimalSI")
+				}
+				if metricsItem, ok := listMetrics[podJ.Name]; ok {
+					usageJ = metricsItem["cpu"]
+				} else {
+					usageJ = *resource.NewQuantity(0, "DecimalSI")
+				}
+				if usageI.AsDec().Cmp(usageJ.AsDec()) < 0 {
+					return false
+				} else {
+					return true
+				}
 			}
 		})
-		// Sift through the pods, with the first being the highest CPU usage
-		for i, pod := range podList.Items {
+		// Sift through the pods, with the first being the highest CPU usage non RT-container
+		for _, pod := range podList.Items {
 			if rtItem, ok := realTimeData[pod.Labels["scheduling.francescol96.univr"]]; ok {
 				log.Log.V(1).Info("RealTimeData found", "pod", pod.Name, "rtItem criticality", rtItem.Criticality)
 				// If the node only has RT containers, start evicting RT containers too
 				// Only if they are not criticality C
-				if i == 0 && rtItem.Criticality != "C" {
+				if rtItem.Criticality != "C" {
 					return &pod
 				}
 			} else {
 				return &pod
 			}
-			/*
-				if pod.Name == rt.Spec.PodName {
-					victim = &pod
-				}*/
 		}
 	}
 	return nil
@@ -407,7 +420,7 @@ func (r *MonitoringReconciler) StartTaintThread() {
 							// Update array without last element
 							node.Spec.Taints = node.Spec.Taints[:len(node.Spec.Taints)-1]
 						}
-						logger.V(1).Info("Taint Thread: untaining node", "node", nodeName)
+						logger.V(0).Info("Taint Thread: untaining node", "node", nodeName)
 						err = r.Update(context.TODO(), node)
 						if err != nil {
 							logger.Error(err, "Taint Thread: error while un-tainting the node")
