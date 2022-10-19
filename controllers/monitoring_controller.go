@@ -66,7 +66,7 @@ type RealTimeData struct {
 var Timers = make(map[string]int)
 
 // The polling rate to remove the taint
-const polling_rate = 10
+const polling_rate = 1
 
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings/status,verbs=get;update;patch
@@ -89,7 +89,9 @@ const polling_rate = 10
 func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	defer duration(track("Reconcile")) // This call measures the Reconcile run-time
 	logger := log.Log.WithValues("Moniroting/rt", req.NamespacedName)
-	logger.V(1).Info("Moniroting/rt Reconcile method")
+	loggerLowPrio := logger.V(1)  // Debug level
+	loggerHighPrio := logger.V(0) // Info level
+	loggerLowPrio.Info("Moniroting/rt Reconcile method")
 
 	rt := &rtv1alpha1.Monitoring{}
 
@@ -97,7 +99,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	err := r.Get(ctx, req.NamespacedName, rt)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.V(1).Info("Moniroting/rt resource not found. Ignoring since object must be deleted")
+			loggerLowPrio.Info("Moniroting/rt resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Moniroting/rt instance")
@@ -106,11 +108,11 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check if node specified in monitoring object exists
 	foundNode := &corev1.Node{}
-	logger.V(1).Info("Checking if node exists:", "Node", rt.Spec.Node)
+	loggerLowPrio.Info("Checking if node exists:", "Node", rt.Spec.Node)
 	err = r.Get(ctx, types.NamespacedName{Name: rt.Spec.Node}, foundNode)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.V(1).Info("Checking if node exists: Node not found. Ignoring..")
+			loggerLowPrio.Info("Checking if node exists: Node not found. Ignoring..")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get node instance for comparison with RT monitoring")
@@ -119,7 +121,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check if pod specified in monitoring object exists
 	podList := &corev1.PodList{}
-	logger.V(1).Info("Checking if pod exists:", "Pod", rt.Spec.PodName)
+	loggerLowPrio.Info("Checking if pod exists:", "Pod", rt.Spec.PodName)
 	opts := []client.ListOption{
 		client.InNamespace("default"),
 	}
@@ -142,13 +144,13 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if foundPod == -1 || podList.Items[foundPod].Name != rt.Spec.PodName {
-		logger.V(1).Info("Checking if pod exists: Pod not found. Ignoring...")
+		loggerLowPrio.Info("Checking if pod exists: Pod not found. Ignoring...")
 		return ctrl.Result{}, nil
 	}
 
 	// The pod and node exist, check if req missedDeadlinesPeriod are higher than VALUE
 	if rt.Spec.MissedDeadlinesPeriod > 10 {
-		logger.V(1).Info("Deleting pod: too many missed RT deadlines", "MissedDeadlinesPeriod", rt.Spec.MissedDeadlinesPeriod)
+		loggerLowPrio.Info("Deleting pod: too many missed RT deadlines", "MissedDeadlinesPeriod", rt.Spec.MissedDeadlinesPeriod)
 
 		// Taint the node so that no other pod can be scheduled on it
 		taintExists := false
@@ -158,7 +160,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		if taintExists {
-			logger.V(1).Info("Node already tainted with RTDeadlinePressure:noSchedule, updating timer")
+			loggerLowPrio.Info("Node already tainted with RTDeadlinePressure:noSchedule, updating timer")
 			Timers[foundNode.Name]++
 		} else {
 			foundNode.Spec.Taints = append(foundNode.Spec.Taints, corev1.Taint{
@@ -166,7 +168,7 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				Value:  "True",
 				Effect: corev1.TaintEffectNoSchedule,
 			})
-			logger.V(1).Info("Tainting node with RTDeadlinePressure:noSchedule")
+			loggerLowPrio.Info("Tainting node with RTDeadlinePressure:noSchedule")
 			err = r.Update(ctx, foundNode)
 			if err != nil {
 				logger.Error(err, "Error while tainting the node")
@@ -179,14 +181,14 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Delete the current pod
 		victimPod := r.selectPodVictimForDeletion(rt, podList)
 		if victimPod == nil {
-			logger.V(0).Info("No pod can be evicted")
+			loggerHighPrio.Info("No pod can be evicted")
 			return ctrl.Result{}, nil
 		}
 		err = r.Delete(ctx, victimPod)
-		logger.V(0).Info("Deleting Pod", "Pod", victimPod)
+		loggerHighPrio.Info("Deleting Pod", "Pod", victimPod)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				logger.V(0).Info("Pod not found. Ignoring since pod must be deleted")
+				loggerHighPrio.Info("Pod not found. Ignoring since pod must be deleted")
 				return ctrl.Result{}, nil
 			}
 			logger.Error(err, "Error while deleting pod", "Pod", victimPod)
@@ -364,7 +366,6 @@ func track(msg string) (string, time.Time) {
 	return msg, time.Now()
 }
 
-var min time.Duration = time.Duration(100) * time.Second
 var max time.Duration = time.Duration(0) * time.Nanosecond
 var counter int = 1
 
@@ -372,15 +373,13 @@ var counter int = 1
 func duration(msg string, start time.Time) {
 	elapsed := time.Since(start)
 	if counter > 1 {
-		if elapsed < min {
-			min = elapsed
-		}
 		if elapsed > max {
 			max = elapsed
 		}
 	}
 	if counter%50 == 0 {
-		log.Log.V(0).Info("Time", msg, elapsed, "Max", max, "Min", min)
+		log.Log.V(0).Info("Time", msg, elapsed, "Max", max)
+		counter = 1
 	}
 	counter++
 }
@@ -430,7 +429,7 @@ func (r *MonitoringReconciler) StartTaintThread() {
 					delete(Timers, nodeName)
 				} else {
 					// If the timer is not zero, we decrement it
-					logger.V(1).Info("Decrementing timer", nodeName, Timers[nodeName])
+					logger.V(0).Info("Decrementing timer", nodeName, Timers[nodeName])
 					Timers[nodeName]--
 				}
 			}
