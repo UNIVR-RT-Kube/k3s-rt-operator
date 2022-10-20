@@ -66,7 +66,7 @@ type RealTimeData struct {
 var Timers = make(map[string]int)
 
 // The polling rate to remove the taint
-const polling_rate = 1
+const polling_rate = 10
 
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rt.francescol96.univr,resources=monitorings/status,verbs=get;update;patch
@@ -200,6 +200,50 @@ func (r *MonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // Insert your policy for eviction here
 func (r *MonitoringReconciler) selectPodVictimForDeletion(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
+	listMetrics, err := listMetrics()
+	if err != nil {
+		log.Log.Error(err, "selectPodVictimForDeletion: error retrieving pods metrics")
+		return &corev1.Pod{}
+	}
+	realTimeData, err := r.GetRealTimeData(context.TODO())
+	if err != nil {
+		log.Log.Error(err, "could not obtain RT data")
+	} else {
+		max_nonRT := *resource.NewQuantity(0, "DecimalSI")
+		max_RT := *resource.NewQuantity(0, "DecimalSI")
+		res_nonRT := &corev1.Pod{}
+		res_RT := &corev1.Pod{}
+
+		for i, pod := range podList.Items {
+			var usagePod resource.Quantity
+			if metricsItem, ok := listMetrics[pod.Name]; ok {
+				usagePod = metricsItem["cpu"]
+			}
+			if rtItem, ok := realTimeData[pod.Labels["scheduling.francescol96.univr"]]; ok {
+				if rtItem.Criticality != "C" {
+					if usagePod.AsDec().Cmp(max_RT.AsDec()) > 0 {
+						max_RT = usagePod
+						res_RT = &podList.Items[i]
+					}
+				}
+			} else {
+				if usagePod.AsDec().Cmp(max_nonRT.AsDec()) > 0 {
+					max_nonRT = usagePod
+					res_nonRT = &podList.Items[i]
+				}
+			}
+		}
+		if max_nonRT.AsDec().Cmp(resource.NewQuantity(0, "DecimalSI").AsDec()) > 0 && res_nonRT != nil {
+			return res_nonRT
+		} else if max_RT.AsDec().Cmp(resource.NewQuantity(0, "DecimalSI").AsDec()) > 0 && res_RT != nil {
+			return res_RT
+		}
+	}
+	return nil
+}
+
+// This function is not called, but contains a linearithmic policy
+func (r *MonitoringReconciler) selectPodVictimForDeletionLinearithmic(rt *rtv1alpha1.Monitoring, podList *corev1.PodList) *corev1.Pod {
 	listMetrics, err := listMetrics()
 	if err != nil {
 		log.Log.Error(err, "selectPodVictimForDeletion: error retrieving pods metrics")
